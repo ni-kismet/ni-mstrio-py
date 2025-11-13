@@ -91,6 +91,7 @@ class ObjectTypes(Enum):
     DRIVER = 84
     INTERFACE_LANGUAGE = 85
     WORKFLOW = 86
+    TEST_SUITE = 93
     NOT_SUPPORTED = None
 
     def __new__(cls, value):
@@ -102,11 +103,38 @@ class ObjectTypes(Enum):
         return self.value
 
     @classmethod
+    def _rest_aliases(cls):
+        return {
+            ObjectTypes.AUTO_STYLE: 'style',
+            ObjectTypes.SUBSCRIPTION_DEVICE: 'device',
+            ObjectTypes.SHORTCUT_TYPE: 'type_shortcut',
+            ObjectTypes.DBROLE: 'db_role',
+            ObjectTypes.DBLOGIN: 'db_login',
+            ObjectTypes.DBCONNECTION: 'db_connection',
+            ObjectTypes.SERVER_DEFINITION: 'server_def',
+            ObjectTypes.SUBSCRIPTION_TRANSMITTER: 'transmitter',
+            ObjectTypes.PACKAGE_DEFINITION: 'function_package_definition',
+            ObjectTypes.DBTABLE: 'db_table',
+            ObjectTypes.DBMS: 'type_dbms',
+            ObjectTypes.SECURITY_FILTER: 'md_security_filter',
+            ObjectTypes.SHORTCUT: 'external_shortcut',
+            ObjectTypes.SHORTCUT_TARGET: 'external_shortcut_target',
+            ObjectTypes.DASHBOARD_PERSONAL_VIEW: 'dossier_personal_view',
+            ObjectTypes.SCRIPT: 'command_manager_script',
+            ObjectTypes.RUNTIME: 'script_runtime_env',
+        }
+
+    @classmethod
     def _missing_(cls, value):
-        member = object.__new__(cls)
-        member._value_ = value
-        member._name_ = f'UNDEFINED_TYPE:{value}'
-        return member
+        aliases = cls._rest_aliases()
+        aliases_to_enum_items = {aliases[enum_item]: enum_item for enum_item in aliases}
+        if value in aliases_to_enum_items:
+            return aliases_to_enum_items[value]
+        else:
+            member = object.__new__(cls)
+            member._value_ = value
+            member._name_ = f'UNDEFINED_TYPE:{value}'
+            return member
 
     @staticmethod
     def contains(item):
@@ -123,6 +151,21 @@ class ObjectTypes(Enum):
             for subtype in ObjectSubTypes
             if subtype.value and subtype.value >> 8 == self.value
         ]
+
+    @classmethod
+    def from_rest_value(cls, source, *args, **kwargs):
+        """Handle missing values in the enum."""
+        aliases = cls._rest_aliases()
+        aliases_to_enum_items = {aliases[enum_item]: enum_item for enum_item in aliases}
+        if source in aliases_to_enum_items:
+            return aliases_to_enum_items[source]
+        else:
+            return cls[source.upper()]
+
+    def to_rest_value(self):
+        """Return the REST alias for the object subtype."""
+        aliases = self._rest_aliases()
+        return aliases.get(self, self.name.lower())
 
 
 class ObjectSubTypes(Enum):
@@ -142,7 +185,7 @@ class ObjectSubTypes(Enum):
     INCREMENTAL_REFRESH_REPORT = 777
     REPORT_TRANSACTION = 778
     SUPER_CUBE = 779
-    SUBER_CUBE_IRR = 780
+    SUPER_CUBE_IRR = 780
     REPORT_HYPER_CARD = 781
     METRIC = 1024
     SUBTOTAL_DEFINITION = 1025
@@ -198,9 +241,13 @@ class ObjectSubTypes(Enum):
     PROPERTY_SET = 7168
     DB_ROLE = 7424
     DB_ROLE_DATA_IMPORT = 7425
+    DB_ROLE_DATA_IMPORT_PRIMARY = 7426
     DB_ROLE_OAUTH = 7427
+    DB_ROLE_REMOTE_DATA_SOURCE = 7428
+    DB_ROLE_URL_AUTH = 7429
     DB_ROLE_GENERIC_DATA_CONNECTOR = 7430
     DB_LOGIN = 7680
+    DB_LOGIN_SECRET_VAULT = 7681
     DB_CONNECTION = 7936
     PROJECT = 8192
     SERVER_DEFINITION = 8448
@@ -234,6 +281,8 @@ class ObjectSubTypes(Enum):
     DOCUMENT_BOT = 14084
     DOCUMENT_BOT_2_0 = 14087
     DOCUMENT_BOT_UNIVERSAL = 14091
+    DOCUMENT_AGENT = 14087
+    DOCUMENT_AGENT_UNIVERSAL = 14091
     DRILL_MAP = 14336
     DBMS = 14592
     MD_SECURITY_FILTER = 14848
@@ -284,6 +333,7 @@ class ObjectSubTypes(Enum):
     APPLICATION_EXCEL = 19970
     APPLICATION_TEAMS = 19971
     APPLICATION_TABLEAU = 19972
+    APPLICATION_GOOGLE_SHEETS = 19973
     TIMEZONE_SYSTEM = 20224
     TIMEZONE_CUSTOM = 20225
     CALENDAR_SYSTEM = 20736
@@ -307,6 +357,59 @@ class ObjectSubTypes(Enum):
     def __int__(self):
         return self.value
 
+    @classmethod
+    def _rest_aliases(cls):
+        return {
+            ObjectSubTypes.OLAP_CUBE: 'report_cube',
+            ObjectSubTypes.INCREMENTAL_REFRESH_REPORT: 'report_incremental_refresh',
+            ObjectSubTypes.SUPER_CUBE: 'report_emma_cube',
+            ObjectSubTypes.SUPER_CUBE_IRR: 'report_emma_incremental_refresh',
+            ObjectSubTypes.REPORT_HYPER_CARD: 'report_hypercard',
+            ObjectSubTypes.METRIC_AGG: 'agg_metric',
+            ObjectSubTypes.PROMPT_BIG_DECIMAL: 'prompt_bigdecimal',
+            ObjectSubTypes.ATTRIBUTE_DERIVED: 'derived_attribute',
+            ObjectSubTypes.ATTRIBUTE_FORM_SYSTEM: 'form_system',
+            ObjectSubTypes.ATTRIBUTE_FORM_NORMAL: 'form_normal',
+            ObjectSubTypes.CATALOG_DEFINITION: 'catalog_def',
+            ObjectSubTypes.DB_ROLE_GENERIC_DATA_CONNECTOR: (
+                'db_role_generic_dataconnector'
+            ),
+            ObjectSubTypes.SERVER_DEFINITION: 'server_def',
+            ObjectSubTypes.FUNCTION_PACKAGE_DEFINITION: 'function_package_def',
+            ObjectSubTypes.INBOX_MESSAGE: 'inbox_msg',
+            ObjectSubTypes.DOCUMENT_DEFINITION: 'document_def',
+            ObjectSubTypes.DOCUMENT_BOT: 'chat_bot',
+            ObjectSubTypes.DOCUMENT_BOT_2_0: 'chat_bot_v2',
+            ObjectSubTypes.DOCUMENT_BOT_UNIVERSAL: 'universal_chat_bot',
+            ObjectSubTypes.DOCUMENT_AGENT: 'chat_bot_v2',
+            ObjectSubTypes.DOCUMENT_AGENT_UNIVERSAL: 'universal_chat_bot',
+            ObjectSubTypes.PROMPT_ANSWER_BIG_DECIMAL: 'prompt_answer_bigdecimal',
+            ObjectSubTypes.CHANGE_JOURNAL_SEARCH: 'changejournal_search',
+            ObjectSubTypes.CHANGE_JOURNAL: 'changejournal',
+            ObjectSubTypes.SYSTEM_PALETTE: 'palette_system',
+            ObjectSubTypes.CUSTOM_PALETTE: 'palette_custom',
+            ObjectSubTypes.SCRIPT: 'command_manager_script_python',
+            ObjectSubTypes.JUPYTER_NOTEBOOK_SCRIPT: (
+                'command_manager_script_jupyter_notebook'
+            ),
+            ObjectSubTypes.IAM_SECRET_VAULT: 'vault_connection',
+        }
+
+    @classmethod
+    def from_rest_value(cls, source, *args, **kwargs):
+        """Handle missing values in the enum."""
+        aliases = cls._rest_aliases()
+        aliases_to_enum_items = {aliases[enum_item]: enum_item for enum_item in aliases}
+        if source in aliases_to_enum_items:
+            return aliases_to_enum_items[source]
+        else:
+            return cls[source.upper()]
+
+    def to_rest_value(self):
+        """Return the REST alias for the object subtype."""
+        aliases = self._rest_aliases()
+        return aliases.get(self, self.name.lower())
+
 
 class ExtendedType(Enum):
     RESERVED = 0
@@ -314,21 +417,23 @@ class ExtendedType(Enum):
     MDX = 2
     CUSTOM_SQL_FREE_FORM = 3
     CUSTOM_SQL_WIZARD = 4
-    DATA_IMPORT_GENERAL = 256
-    DATA_IMPORT_FILE_EXCEL = 272
-    DATA_IMPORT_FILE_TEXT = 288
-    DATA_IMPORT_CUSTOM_SQL = 304
-    DATA_IMPORT_TABLE = 320
-    DATA_IMPORT_OAUTH = 336
-    DATA_IMPORT_OAUTH_SFDC = 337
-    DATA_IMPORT_OAUTH_GDRIVE = 338
-    DATA_IMPORT_OAUTH_DROPBOX = 339
-    _ = 341
-    DATA_IMPORT_CUSTOM_SQL_WIZARD = 352
-    DATA_IMPORT_SPARK = 416
-    DATA_IMPORT_DATASET = 448
-    DATA_IMPORT_OLAP_CUBE = 4096
-    DATA_IMPORT_LIVE_CUBE = 4097
+    FLAT_FILE = 5
+    DATA_IMPORT_GENERAL = 0x100
+    DATA_IMPORT_FILE_EXCEL = 0x110
+    DATA_IMPORT_FILE_TEXT = 0x120
+    DATA_IMPORT_CUSTOM_SQL = 0x130
+    DATA_IMPORT_TABLE = 0x140
+    DATA_IMPORT_OAUTH = 0x150
+    DATA_IMPORT_OAUTH_SFDC = 0x151
+    DATA_IMPORT_OAUTH_GDRIVE = 0x152
+    DATA_IMPORT_OAUTH_DROPBOX = 0x153
+    _ = 0x155
+    DATA_IMPORT_CUSTOM_SQL_WIZARD = 0x160
+    DATA_IMPORT_SINGLE_TABLE = 0x170
+    DATA_IMPORT_SPARK = 0x1A0
+    DATA_IMPORT_DATASET = 0x1C0
+    DATA_IMPORT_OLAP_CUBE = 0x1000
+    DATA_IMPORT_LIVE_CUBE = 0x1001
 
     def __new__(cls, value):
         member = object.__new__(cls)

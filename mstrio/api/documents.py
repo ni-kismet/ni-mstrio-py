@@ -3,7 +3,6 @@ from typing import TYPE_CHECKING
 from requests import Response
 
 from mstrio.utils.error_handlers import ErrorHandler
-from mstrio.utils.helper import get_valid_project_id
 
 if TYPE_CHECKING:
     from mstrio.connection import Connection
@@ -268,6 +267,7 @@ def get_attribute_element_for_prompt(
     instance_id: str,
     prompt_identifier: str,
     error_msg: str | None = None,
+    project_id: str | None = None,
 ) -> 'Response':
     """Get available attribute element for dashboard/document's
     attribute element prompt.
@@ -278,15 +278,18 @@ def get_attribute_element_for_prompt(
         instance_id (string): Document Instance ID
         prompt_identifier (string): Prompt key or ID
         error_msg (string, optional): Custom Error Message for Error Handling
+        project_id (string, optional): Project ID
 
     Returns:
         Complete HTTP response object.
     """
+    if not project_id:
+        project_id = connection.project_id
     endpoint = (
         f'/api/documents/{document_id}/instances/{instance_id}'
         f'/prompts/{prompt_identifier}/elements'
     )
-    return connection.get(endpoint=endpoint, headers={'X-MSTR-ProjectID': None})
+    return connection.get(endpoint=endpoint, headers={'X-MSTR-ProjectID': project_id})
 
 
 @ErrorHandler(err_msg="Error getting available object for prompt {prompt_identifier}")
@@ -404,9 +407,7 @@ def export_document_to_pdf(
     Returns:
         Complete HTTP response object.
     """
-    project_id = get_valid_project_id(
-        connection=connection, project_id=connection.project_id
-    )
+    project_id = connection.project_id
     endpoint = f'/api/documents/{document_id}/instances/{instance_id}/pdf'
     return connection.post(
         endpoint=endpoint, headers={'X-MSTR-ProjectID': project_id}, json=body
@@ -433,9 +434,7 @@ def export_document_to_mstr(
     Returns:
         Complete HTTP response object.
     """
-    project_id = get_valid_project_id(
-        connection=connection, project_id=connection.project_id
-    )
+    project_id = connection.project_id
     endpoint = f'/api/documents/{document_id}/instances/{instance_id}/mstr'
     return connection.post(
         endpoint=endpoint, headers={'X-MSTR-ProjectID': project_id}, json=body
@@ -462,9 +461,7 @@ def export_document_to_excel(
     Returns:
         Complete HTTP response object.
     """
-    project_id = get_valid_project_id(
-        connection=connection, project_id=connection.project_id
-    )
+    project_id = connection.project_id
     endpoint = f'/api/documents/{document_id}/instances/{instance_id}/excel'
     return connection.post(
         endpoint=endpoint, headers={'X-MSTR-ProjectID': project_id}, json=body

@@ -3,6 +3,7 @@ import inspect
 import logging
 from collections.abc import Callable
 from enum import Enum
+from functools import partial
 from os.path import join as joinpath
 from pprint import pprint
 from sys import version_info
@@ -21,9 +22,9 @@ from mstrio.utils.acl import ACE, ACLMixin
 from mstrio.utils.dependence_mixin import DependenceMixin
 from mstrio.utils.helper import (
     get_response_json,
-    get_valid_project_id,
     rename_dict_keys,
 )
+from mstrio.utils.resolvers import get_project_id_from_params_set
 from mstrio.utils.response_processors import objects as objects_processors
 from mstrio.utils.time_helper import (
     DatetimeFormats,
@@ -34,6 +35,7 @@ from mstrio.utils.translation_mixin import TranslationMixin
 from mstrio.utils.version_helper import method_version_handler
 
 if TYPE_CHECKING:
+    from mstrio.modeling import Prompt
     from mstrio.object_management import Folder, Shortcut
     from mstrio.server import Project
 
@@ -310,7 +312,20 @@ class EntityBase(helper.Dictable):
             True if subtype is supported by class.
             False if subtype is not supported.
         """
-        return subtype in [item.value for item in cls._OBJECT_SUBTYPES]
+        return subtype in cls._get_subtypes_as_raw_values()
+
+    @classmethod
+    def _get_subtypes_as_raw_values(cls) -> list[int]:
+        """Returns a list of supported subtypes as raw integer values.
+
+        Returns:
+            A list of integers representing supported subtypes.
+        """
+        return (
+            [item.value for item in cls._OBJECT_SUBTYPES]
+            if cls._OBJECT_SUBTYPES
+            else []
+        )
 
     def _add_missing_attributes(self, key, json) -> None:
         # Set the keys that are missing in the response to None
@@ -383,12 +398,13 @@ class EntityBase(helper.Dictable):
         return rename_dict_keys(response, cls._REST_ATTR_MAP)
 
     @classmethod
-    def _python_to_rest(cls, request_body: dict) -> dict:
+    def _python_to_rest(cls, request_body: dict, to_camel=False) -> dict:
         """Map Python API field names to REST API field names as specified in
         cls._REST_ATTR_MAP.
 
         Args:
             request_body (dict): A dictionary representing an HTTP request body.
+            to_camel (bool): If True, converts keys to camelCase format.
 
         Returns:
             dict: A dictionary with field names converted to REST API names.
@@ -397,6 +413,8 @@ class EntityBase(helper.Dictable):
         for rest_name, python_name in cls._REST_ATTR_MAP.items():
             if python_name in body:
                 body[rest_name] = body.pop(python_name)
+        if to_camel:
+            body = helper.snake_to_camel(body, whitelist=cls._KEEP_CAMEL_CASE)
         return body
 
     def __compose_val(self, key: str, val: Any) -> Any:
@@ -483,8 +501,9 @@ class EntityBase(helper.Dictable):
                     self.__class__, lambda x: isinstance(x, property)
                 )
             ]
-            attr = list(set(attr))
             excluded_properties = excluded_properties or []
+            attr = [a for a in attr if a not in excluded_properties]
+            attr = list(set(attr))
             for a in attr:
                 try:
                     getattr(self, a)
@@ -508,7 +527,7 @@ class EntityBase(helper.Dictable):
 
         return {
             key: attributes[key]
-            for key in sorted(attributes, key=helper.sort_object_properties)
+            for key in sorted(attributes, key=helper.key_fn_for_sort_object_properties)
         }
 
     def to_dataframe(self) -> DataFrame:
@@ -535,7 +554,7 @@ class EntityBase(helper.Dictable):
         connection: Connection,
         to_snake_case: bool = True,
         with_missing_value: bool = False,
-    ) -> type[T]:
+    ) -> T:
         """Overrides `Dictable.from_dict()` to instantiate an object from
             a dictionary without calling any additional getters.
 
@@ -798,18 +817,15 @@ class EntityBase(helper.Dictable):
                 'patch').
         """
         changed = []
-        camel_properties = helper.snake_to_camel(
-            properties, whitelist=self._KEEP_CAMEL_CASE
-        )
         for attrs, (func, func_type) in self._API_PATCH.items():
             if func_type == 'partial_put':
-                translated_properties = self._python_to_rest(camel_properties)
+                translated_properties = self._python_to_rest(properties, to_camel=True)
                 body = self.__partial_put_body(attrs, translated_properties)
             elif func_type == 'put':  # Update using the generic update_object()
                 body = self.__put_body(attrs, properties)
                 body = self._python_to_rest(body)
             elif func_type == 'patch':
-                translated_properties = self._python_to_rest(camel_properties)
+                translated_properties = self._python_to_rest(properties, to_camel=True)
                 body = self.__patch_body(attrs, translated_properties, op)
             else:
                 msg = (
@@ -1178,9 +1194,9 @@ class Entity(EntityBase, ACLMixin, DependenceMixin, TranslationMixin):
         target_folder_id: str | None = None,
         target_folder_path: str | None = None,
         target_folder: 'Folder | None' = None,
+        project: 'Project | str | None' = None,
         project_id: str | None = None,
         project_name: str | None = None,
-        project: 'Project | None' = None,
         to_dictionary: bool = False,
     ) -> 'Shortcut':
         """Create a shortcut to the object.
@@ -1194,14 +1210,11 @@ class Entity(EntityBase, ACLMixin, DependenceMixin, TranslationMixin):
                 May be used instead of `target_folder_id`.
             target_folder (Folder, optional): Target folder object.
                 May be used instead of `target_folder_id`.
-            project_id (str, optional): ID of the target project of the new
-                shortcut. The project may be specified by either `project_id`,
-                `project_name` or `project`. If the project is not specified in
-                either way, the project from the `connection` object is used.
-            project_name (str, optional): Name of the target project.
-                May be used instead of `project_id`.
-            project (Project, optional): Project object specifying the target
-                project. May be used instead of `project_id`.
+            project (Project | str, optional): Project object or ID or name
+                specifying the project. May be used instead of `project_id` or
+                `project_name`.
+            project_id (str, optional): Project ID
+            project_name (str, optional): Project name
             to_dictionary (bool, optional): If True, the method will return
                 a dictionary with the shortcut's properties instead of a
                 Shortcut object. Defaults to False.
@@ -1219,13 +1232,11 @@ class Entity(EntityBase, ACLMixin, DependenceMixin, TranslationMixin):
         if not target_folder_id:
             raise ValueError("Target folder not specified.")
 
-        if project_id is None and project is not None:
-            project_id = project.id
-        project_id = get_valid_project_id(
-            connection=self.connection,
-            project_id=project_id,
-            project_name=project_name,
-            with_fallback=True,
+        proj_id = get_project_id_from_params_set(
+            self.connection,
+            project,
+            project_id,
+            project_name,
         )
 
         body = {
@@ -1237,7 +1248,7 @@ class Entity(EntityBase, ACLMixin, DependenceMixin, TranslationMixin):
             id=self.id,
             object_type=self._OBJECT_TYPE.value,
             body=body,
-            project_id=project_id,
+            project_id=proj_id,
         )
         body = res.json()
         shortcut_id = body.get('id')
@@ -1336,11 +1347,11 @@ class CopyMixin:
     """
 
     def create_copy(
-        self: Entity,
+        self: T,
         name: str | None = None,
         folder_id: str | None = None,
         project: 'Project | str | None' = None,
-    ) -> Any:
+    ) -> T:
         """Create a copy of the object on the I-Server.
 
         Args:
@@ -1573,11 +1584,156 @@ class VldbMixin:
         return self._vldb_settings
 
 
+class PromptMixin:
+    """Mixin that adds prompt functionality to Strategy One objects.
+
+    Enables objects to retrieve and answer prompts - interactive input elements
+    that collect user responses before execution. Must be mixed in with Entity
+    or its subclasses.
+
+    Attributes:
+        _API_GET_PROMPTS (Callable): Function to retrieve object prompts
+        _API_PROMPT_GET_INSTANCE (Callable): Function to get object instance
+        _API_PROMPT_GET_OBJ_STATUS (Callable): Function to check object status
+        _API_PROMPT_GET_PROMPTED_INSTANCE (Callable): Function to get prompted
+            instance
+        _API_PROMPT_ANSWER_PROMPTS (Callable): Function to submit prompt answers
+
+    Properties:
+        prompts (list[Prompt]): List of Prompt objects for the object
+
+    Methods:
+        answer_prompts: Submit answers to object prompts
+
+    Example:
+        >>> report = Report(connection, id='report_id')
+        >>> prompts = report.prompts
+        >>> prompt_answers = [Prompt(key='prompt_key', answers=['value1'])]
+        >>> success = report.answer_prompts(prompt_answers)
+    """
+
+    _API_GET_PROMPTS: Callable
+    _API_PROMPT_GET_INSTANCE: Callable
+    _API_PROMPT_GET_OBJ_STATUS: Callable
+    _API_PROMPT_GET_PROMPTED_INSTANCE: Callable
+    _API_PROMPT_ANSWER_PROMPTS: Callable
+    _prompts: None | list['Prompt'] = None
+
+    @property
+    def prompts(self) -> list['Prompt']:
+        """Get prompts of the object."""
+
+        from mstrio.modeling.prompt import Prompt
+
+        if self._prompts is None:
+            param_value_dict = auto_match_args_entity(
+                self._API_GET_PROMPTS, self, id_weak_match=True
+            )
+            if (
+                'project_id' in param_value_dict
+                and param_value_dict['project_id'] is None
+            ):
+                param_value_dict['project_id'] = self.connection.project_id
+            response = self._API_GET_PROMPTS(**param_value_dict)
+            prompts = response.json()
+            self._prompts = [
+                Prompt.from_dict(source=prompt, connection=self.connection)
+                for prompt in prompts
+            ]
+        return self._prompts
+
+    def answer_prompts(
+        self,
+        prompt_answers: 'list[Prompt] | Prompt | None' = None,
+        force: bool = False,
+        instance_id: str | None = None,
+    ) -> bool:
+        """Answer prompts of the object.
+
+        Args:
+            prompt_answers (list[Prompt], Prompt | optional): List of Prompt
+                objects containing answers for the object's prompts. Each prompt
+                can specify either 'answers' (custom values) or
+                'use_default=True' (to use the prompt's default value).
+                If None, the user will be prompted interactively for input.
+                Defaults to None.
+            force (bool, optional): Controls prompt answer behavior:
+                - If True: Apply provided prompt answers without any
+                    confirmation questions. If a required prompt is missing
+                    from prompt_answers, raises an error.
+                - If False: Ask user for confirmation before overriding existing
+                    answers. If prompt answers are not provided, opens
+                    interactive user input.
+                Defaults to False.
+            instance_id (str | None, optional): Instance ID for the prompt
+                answers.
+
+        Returns:
+            bool: True if prompts were answered successfully, False otherwise.
+        """
+        from mstrio.modeling import Prompt
+        from mstrio.project_objects.helpers import answer_prompts_helper
+
+        is_report = (
+            hasattr(self, '_OBJECT_TYPE')
+            and self._OBJECT_TYPE == ObjectTypes.REPORT_DEFINITION
+        )
+        id_param_name = 'report_id' if is_report else 'document_id'
+
+        instance_id = (
+            instance_id
+            or self.instance_id
+            or (
+                self._API_PROMPT_GET_INSTANCE(
+                    connection=self.connection, **{id_param_name: self.id}
+                )
+                .json()
+                .get('instanceId')
+                if is_report
+                else None
+            )
+        )
+
+        api_context = {
+            'connection': self.connection,
+            id_param_name: self.id,
+            'instance_id': instance_id,
+            'project_id': getattr(self, '_project_id', None)
+            or self.connection.project_id,
+        }
+
+        if isinstance(prompt_answers, Prompt):
+            prompt_answers = [prompt_answers]
+
+        if not answer_prompts_helper(
+            instance_id=instance_id,
+            prompt_answers=prompt_answers,
+            get_status_func=partial(
+                self._API_PROMPT_GET_OBJ_STATUS,
+                **api_context,
+            ),
+            get_prompts_func=partial(
+                self._API_PROMPT_GET_PROMPTED_INSTANCE,
+                **api_context,
+                closed=False,
+            ),
+            answer_prompts_func=partial(self._API_PROMPT_ANSWER_PROMPTS, **api_context),
+            force=force,
+        ):
+            return False
+
+        # If prompts were answered successfully, update the instance_id
+        self._instance_id = instance_id
+
+        return True
+
+
 def auto_match_args_entity(
     func: Callable,
     obj: EntityBase,
     exclude: list | None = None,
     include_defaults: bool = True,
+    id_weak_match: bool = False,
 ) -> dict:
     """Automatically match `obj` object data to function arguments.
 
@@ -1599,7 +1755,9 @@ def auto_match_args_entity(
         key[1:] if key.startswith("_") else key: val
         for key, val in obj.__dict__.items()
     }
-    kwargs = helper.auto_match_args(func, obj_dict, exclude, include_defaults)
+    kwargs = helper.auto_match_args(
+        func, obj_dict, exclude, include_defaults, id_weak_match
+    )
 
     if "object_type" in kwargs:
         kwargs.update({"object_type": obj._OBJECT_TYPE.value})

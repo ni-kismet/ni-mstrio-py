@@ -20,6 +20,7 @@ from mstrio.server.project_languages import (
 from mstrio.utils import helper, time_helper
 from mstrio.utils.entity import DeleteMixin, Entity, EntityBase, ObjectTypes
 from mstrio.utils.enum_helper import AutoName, AutoUpperName, get_enum_val
+from mstrio.utils.resolvers import validate_owner_key_in_filters
 from mstrio.utils.response_processors import datasources as datasources_processors
 from mstrio.utils.response_processors import objects as objects_processors
 from mstrio.utils.response_processors import projects as projects_processors
@@ -27,12 +28,15 @@ from mstrio.utils.settings.base_settings import BaseSettings
 from mstrio.utils.time_helper import DatetimeFormats
 from mstrio.utils.version_helper import (
     is_server_min_version,
+    meets_minimal_version,
     method_version_handler,
 )
 from mstrio.utils.vldb_mixin import ModelVldbMixin
 from mstrio.utils.wip import wip
 
 if TYPE_CHECKING:
+    from requests import Response
+
     from mstrio.datasources import DatasourceInstance
     from mstrio.server.environment import Environment
     from mstrio.server.node import Node
@@ -371,9 +375,7 @@ class Project(Entity, ModelVldbMixin, DeleteMixin):
                 leave=False,
                 disable=config.verbose,
             ):
-                projects.create_project(
-                    connection, {"name": name, "description": description}
-                )
+                projects.create_project(connection, name, description)
                 http_status, i_server_status = 500, 'ERR001'
                 while http_status == 500 and i_server_status == 'ERR001':
                     time.sleep(1)
@@ -398,6 +400,8 @@ class Project(Entity, ModelVldbMixin, DeleteMixin):
         limit: int | None = None,
         **filters,
     ) -> list["Project"] | list[dict]:
+        validate_owner_key_in_filters(filters)
+
         msg = "Error getting information for a set of Projects."
         objects = helper.fetch_objects_async(
             connection,
@@ -448,6 +452,8 @@ class Project(Entity, ModelVldbMixin, DeleteMixin):
     def _list_loaded_projects(
         cls, connection: Connection, to_dictionary: bool = False, **filters
     ) -> list["Project"] | list[dict]:
+        validate_owner_key_in_filters(filters)
+
         response = projects.get_projects(connection, whitelist=[('ERR014', 403)])
         list_of_dicts = response.json() if response.ok else []
         list_of_dicts = helper.camel_to_snake(list_of_dicts)  # Convert keys
@@ -511,6 +517,21 @@ class Project(Entity, ModelVldbMixin, DeleteMixin):
             helper.exception_handler(
                 "'on_nodes' argument needs to be of type: [list[str], str, NoneType]",
                 exception_type=TypeError,
+            )
+
+    def _change_project_state_all_nodes(
+        self, status: str, delete_sessions: bool | None = None
+    ):
+        body = {"status": status}
+        response = monitors.update_project_status(
+            self.connection,
+            body,
+            project_id=self.id,
+            delete_sessions=delete_sessions,
+        )
+        if response.status_code == 202 and config.verbose:
+            logger.info(
+                f"Project '{self.id}' changed status to '{status}' on all nodes."
             )
 
     @method_version_handler('11.2.0000')
@@ -605,6 +626,22 @@ class Project(Entity, ModelVldbMixin, DeleteMixin):
             return [node.name if isinstance(node, Node) else node for node in on_nodes]
         return on_nodes.name if isinstance(on_nodes, Node) else on_nodes
 
+    def _load_project(self, node):
+        body = {
+            "operationList": [
+                {"op": "replace", "path": self._STATUS_PATH, "value": "loaded"}
+            ]
+        }
+        response = monitors.update_node_properties(self.connection, node, self.id, body)
+        if response.status_code == 202:
+            tmp = helper.filter_list_of_dicts(self.nodes, name=node)
+            tmp[0]['projects'] = [response.json()['project']]
+            self._nodes = tmp
+            if tmp[0]['projects'][0]['status'] != 'loaded':
+                self.fetch('nodes')
+            if config.verbose:
+                logger.info(f"Project '{self.id}' loaded on node '{node}'.")
+
     @method_version_handler('11.2.0000')
     def load(
         self, on_nodes: 'str | list[str] | Node | list[Node] | None' = None
@@ -617,30 +654,42 @@ class Project(Entity, ModelVldbMixin, DeleteMixin):
                 on all of the nodes.
         """
         on_nodes = self._normalize_nodes(on_nodes)
+        all_nodes_are_selected = on_nodes is None or {
+            node['name'] for node in self.nodes
+        } == set(on_nodes)
 
-        def load_project(node):
-            body = {
-                "operationList": [
-                    {"op": "replace", "path": self._STATUS_PATH, "value": "loaded"}
-                ]
-            }
-            response = monitors.update_node_properties(
-                self.connection, node, self.id, body
-            )
-            if response.status_code == 202:
-                tmp = helper.filter_list_of_dicts(self.nodes, name=node)
-                tmp[0]['projects'] = [response.json()['project']]
-                self._nodes = tmp
-                if tmp[0]['projects'][0]['status'] != 'loaded':
-                    self.fetch('nodes')
-                if config.verbose:
-                    logger.info(f"Project '{self.id}' loaded on node '{node}'.")
+        if all_nodes_are_selected and meets_minimal_version(
+            self.connection.iserver_version, '11.5.0500'
+        ):
+            self._change_project_state_all_nodes(status="loaded")
+        else:
+            self.__change_project_state(func=self._load_project, on_nodes=on_nodes)
 
-        self.__change_project_state(func=load_project, on_nodes=on_nodes)
+    def _unload_project(self, node):
+        body = {
+            "operationList": [
+                {"op": "replace", "path": self._STATUS_PATH, "value": "unloaded"}
+            ]
+        }
+        response = monitors.update_node_properties(
+            self.connection, node, self.id, body, whitelist=[('ERR001', 500)]
+        )
+        if response.status_code == 202:
+            tmp = helper.filter_list_of_dicts(self.nodes, name=node)
+            tmp[0]['projects'] = [response.json()['project']]
+            self._nodes = tmp
+            if tmp[0]['projects'][0]['status'] != 'unloaded':
+                self.fetch('nodes')
+            if config.verbose:
+                logger.info(f"Project '{self.id}' unloaded on node '{node}'.")
+        if response.status_code == 500 and config.verbose:  # handle whitelisted
+            logger.warning(f"Project '{self.id}' already unloaded on node '{node}'.")
 
     @method_version_handler('11.2.0000')
     def unload(
-        self, on_nodes: 'str | list[str] | Node | list[Node] | None' = None
+        self,
+        on_nodes: 'str | list[str] | Node | list[Node] | None' = None,
+        delete_sessions: bool | None = None,
     ) -> None:
         """Request to unload the project from the chosen cluster nodes. If
         nodes are not specified, the project will be unloaded on all nodes.
@@ -651,32 +700,30 @@ class Project(Entity, ModelVldbMixin, DeleteMixin):
         Args:
             on_nodes: Name of node, if not passed, project will be unloaded
                 on all of the nodes.
+            delete_sessions: If True, will delete all project sessions
+                immediately before unloading.
         """
         on_nodes = self._normalize_nodes(on_nodes)
+        all_nodes_are_selected = on_nodes is None or {
+            node['name'] for node in self.nodes
+        } == set(on_nodes)
 
-        def unload_project(node):
-            body = {
-                "operationList": [
-                    {"op": "replace", "path": self._STATUS_PATH, "value": "unloaded"}
-                ]
-            }
-            response = monitors.update_node_properties(
-                self.connection, node, self.id, body, whitelist=[('ERR001', 500)]
+        supports_server_wide_endpoint = meets_minimal_version(
+            self.connection.iserver_version, '11.5.0500'
+        )
+        if delete_sessions is not None and not supports_server_wide_endpoint:
+            logger.warning(
+                "The `delete_sessions` argument requires iServer version 11.5.0500 or "
+                f"later. Since your server version: {self.connection.iserver_version} "
+                "is not compatible, this parameter will be omitted."
             )
-            if response.status_code == 202:
-                tmp = helper.filter_list_of_dicts(self.nodes, name=node)
-                tmp[0]['projects'] = [response.json()['project']]
-                self._nodes = tmp
-                if tmp[0]['projects'][0]['status'] != 'unloaded':
-                    self.fetch('nodes')
-                if config.verbose:
-                    logger.info(f"Project '{self.id}' unloaded on node '{node}'.")
-            if response.status_code == 500 and config.verbose:  # handle whitelisted
-                logger.warning(
-                    f"Project '{self.id}' already unloaded on node '{node}'."
-                )
 
-        self.__change_project_state(func=unload_project, on_nodes=on_nodes)
+        if all_nodes_are_selected and supports_server_wide_endpoint:
+            self._change_project_state_all_nodes(
+                status="unloaded", delete_sessions=delete_sessions
+            )
+        else:
+            self.__change_project_state(func=self._unload_project, on_nodes=on_nodes)
 
     @method_version_handler('11.3.0800')
     def delete(self: Entity) -> bool:
@@ -1024,6 +1071,168 @@ class Project(Entity, ModelVldbMixin, DeleteMixin):
             ).json()['status']
         )
 
+    @method_version_handler('11.4.1200')
+    def delete_unused_managed_objects(
+        self,
+        try_force_delete: bool = False,
+        return_failed_items: bool = False,
+    ) -> bool | list[dict]:
+        """Delete all unused managed objects in the project.
+
+        Managed Objects in scope of this method are objects of type:
+        - ObjectTypes.ATTRIBUTE,
+        - ObjectTypes.METRIC,
+        - ObjectTypes.CONSOLIDATION,
+        - ObjectTypes.CONSOLIDATION_ELEMENT,
+
+        Note:
+            This method is known to be resource and time intensive. Use only
+            if necessary.
+
+        Args:
+            try_force_delete (bool, optional): If `True`, will attempt to delete
+                items that could not be confirmed whether they are unused, for
+                any reason. Server should not allow deleting of those and throw
+                error which will be caught by this method. Defaults to `False`.
+            return_failed_items (bool, optional): If `True`, will return a list
+                of dicts of data of objects that could not be deleted. If
+                `False`, will return a boolean indicating whether all unused
+                objects were deleted successfully. Defaults to `False`.
+
+        Returns:
+            If `return_failed_items` is `False`, returns `True` if all unused
+            managed objects were deleted successfully, `False` otherwise.
+            If `return_failed_items` is `True`, returns a list of dicts of
+            objects that could not be deleted. If all objects were deleted
+            successfully, returns an empty list.
+        """
+        from mstrio.object_management.object import Object
+        from mstrio.object_management.search_enums import SearchDomain, SearchScope
+        from mstrio.object_management.search_operations import full_search
+
+        items = full_search(
+            self.connection,
+            scope=SearchScope.MANAGED_ONLY,
+            domain=SearchDomain.PROJECT,
+            object_types=[
+                ObjectTypes.ATTRIBUTE,
+                ObjectTypes.METRIC,
+                ObjectTypes.CONSOLIDATION,
+                ObjectTypes.CONSOLIDATION_ELEMENT,
+            ],
+            project=self,
+            include_hidden=True,
+            to_dictionary=True,
+        )
+
+        if config.verbose:
+            logger.info(f"Found {len(items)} managed objects to check if unused.")
+
+        problematic_items: list[dict] = []
+        final_items: list["Object"] = []
+        final_len = 0  # cumulative final items length
+
+        def bulk_delete(objs: list["Object"]) -> bool:
+            FAIL_MSG = "Deleting some of the unused managed objects failed."
+
+            try:
+                res: Response = objects.bulk_delete_objects(
+                    self.connection,
+                    [obj.id for obj in objs],
+                    [obj.type.value for obj in objs],
+                    project_id=self.id,
+                    error_msg=FAIL_MSG,
+                )
+
+                if config.verbose and res.ok:
+                    logger.info(
+                        "Successfully deleted a batch of unused managed "
+                        f"objects in project '{self.id}'."
+                    )
+
+                return res.ok
+            except Exception:
+                logger.warning(FAIL_MSG)
+                return False
+
+        def perform_bulk_delete(checked: int, unused: int) -> None:
+            nonlocal problematic_items, final_items
+
+            if config.verbose:
+                logger.info(
+                    f"Checked {checked} items so far. Found {unused} are "
+                    "confirmed unused."
+                    + (" Deleting this new batch now." if final_items else "")
+                )
+
+            if final_items:
+                if not bulk_delete(final_items):
+                    # bulk delete may have failed due to only some of items,
+                    # not all. Retry one by one to find problematic ones.
+                    for obj in final_items:
+                        try:
+                            obj.delete(force=True)
+                        except Exception:
+                            problematic_items.append(obj.to_dict())
+
+                final_items = []
+
+        for i, itm in enumerate(items):
+            if i % 100 == 0 and i > 0:
+                perform_bulk_delete(i, final_len)
+
+            try:
+                obj = Object.from_dict(
+                    itm,
+                    self.connection,
+                    with_missing_value=True,
+                )
+
+                if not obj.has_dependents():
+                    final_len += 1
+                    final_items.append(obj)
+            except Exception:
+                problematic_items.append(itm)
+
+        perform_bulk_delete(len(items), final_len)
+
+        if problematic_items and try_force_delete:
+            # At this point we were either not able to delete the item, not
+            # able to check if there are dependents, or something happened
+            # during the bulk delete. As a last resort, we will try the most
+            # raw delete method just to see.
+            #
+            # This will fail if there are dependents and this is what we want.
+            if config.verbose:
+                logger.info(
+                    "Some items could not be confirmed whether they are unused. "
+                    "Will try to delete them (this will fail if they are used)."
+                )
+
+            for prob_dict in problematic_items.copy():
+                try:
+                    with config.temp_verbose_disable():
+                        objects.delete_object(
+                            self.connection,
+                            prob_dict['id'],
+                            prob_dict['type'],
+                            project_id=self.id,
+                        )
+                    problematic_items.remove(prob_dict)
+                except Exception:
+                    continue
+
+        if problematic_items:
+            logger.warning(
+                "For the following items, could not check if they are unused "
+                "or could not delete them: "
+                f"{[p.get('id') for p in problematic_items]}. They were skipped."
+            )
+
+        if return_failed_items:
+            return problematic_items
+        return len(problematic_items) == 0
+
     @method_version_handler('11.5.0700')
     def duplicate(
         self,
@@ -1133,7 +1342,7 @@ class Project(Entity, ModelVldbMixin, DeleteMixin):
 
 
 class ProjectSettings(BaseSettings):
-    """Object representation of Strategy One Project (Project) Settings.
+    """Object representation of Strategy One Project Settings.
 
     Used to fetch, view, modify, update, export to file, import from file and
     validate Project settings.
@@ -1393,7 +1602,7 @@ class DuplicationConfig(helper.Dictable):
             include_contact_subscriptions=export_sets.get(
                 'subscription_preferences', {}
             ).get('include_contact_subscriptions', True),
-            import_description=import_sets.get('description', None),
+            import_description=import_sets.get('description'),
             import_default_locale=import_sets.get('default_locale', 0),
             import_locales=import_sets.get('locales', [0]),
         )

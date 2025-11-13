@@ -25,17 +25,23 @@ from mstrio.utils.helper import (
     exception_handler,
     fallback_on_timeout,
     get_parallel_number,
-    get_valid_project_id,
+    get_total_count_of_objects,
+    key_fn_for_sort_object_properties,
     response_handler,
-    sort_object_properties,
 )
 from mstrio.utils.parser import Parser
+from mstrio.utils.resolvers import (
+    get_project_id_from_params_set,
+    validate_owner_key_in_filters,
+)
 from mstrio.utils.response_processors import cubes as cube_processors
 from mstrio.utils.response_processors import objects as objects_processors
 from mstrio.utils.sessions import FuturesSessionWithRenewal
 from mstrio.utils.time_helper import str_to_datetime
 
 if TYPE_CHECKING:
+    from mstrio.server.project import Project
+
     from .cube_cache import CubeCache
     from .olap_cube import OlapCube
     from .super_cube import SuperCube
@@ -98,6 +104,7 @@ def list_all_cubes(
     connection: Connection,
     name: str | None = None,
     search_pattern: SearchPattern | int = SearchPattern.CONTAINS,
+    project: 'Project | str | None' = None,
     project_id: str | None = None,
     project_name: str | None = None,
     to_dictionary: bool = False,
@@ -114,13 +121,6 @@ def list_all_cubes(
         * - 0 or more of any characters
         e.g. name = ?onny will return Sonny and Tonny
 
-    Specify either `project_id` or `project_name`.
-    When `project_id` is provided (not `None`), `project_name` is omitted.
-
-    Note:
-        When `project_id` is `None` and `project_name` is `None`,
-        then its value is overwritten by `project_id` from `connection` object.
-
     Args:
         connection: Strategy One connection object returned by
             `connection.Connection()`
@@ -130,7 +130,10 @@ def list_all_cubes(
             for, such as Begin With or Contains. Possible values are available
             in ENUM mstrio.object_management.SearchPattern.
             Default value is BEGIN WITH (4).
-        project_id (string, optional): Project ID
+        project (Project | str, optional): Project object or ID or name
+            specifying the project. May be used instead of `project_id` or
+            `project_name`.
+        project_id (str, optional): Project ID
         project_name (str, optional): Project name
         to_dictionary (bool, optional): If True returns dict, by default (False)
             returns SuperCube/OlapCube objects
@@ -143,16 +146,18 @@ def list_all_cubes(
     Returns:
         list with OlapCubes and SuperCubes or list of dictionaries
     """
-    project_id = get_valid_project_id(
-        connection=connection,
-        project_id=project_id,
-        project_name=project_name,
-        with_fallback=not project_name,
+    proj_id = get_project_id_from_params_set(
+        connection,
+        project,
+        project_id,
+        project_name,
     )
+
+    validate_owner_key_in_filters(filters)
 
     objects_ = full_search(
         connection,
-        project=project_id,
+        project=proj_id,
         name=name,
         object_types=[ObjectSubTypes.OLAP_CUBE, ObjectSubTypes.SUPER_CUBE],
         pattern=search_pattern,
@@ -300,7 +305,12 @@ class _Cube(Entity, VldbMixin, DeleteMixin):
     """
 
     _OBJECT_TYPE = ObjectTypes.REPORT_DEFINITION
+
+    # Not to be confused with EntityBase._OBJECT_SUBTYPES field, which is a list
+    # used in fetch() to validate subtype. This field is overridden in
+    # subclasses and used in __init__ workflow.
     _OBJECT_SUBTYPE = None
+
     _API_GETTERS = {
         (
             'id',
@@ -726,7 +736,7 @@ class _Cube(Entity, VldbMixin, DeleteMixin):
         }
         return {
             key: attributes[key]
-            for key in sorted(attributes, key=sort_object_properties)
+            for key in sorted(attributes, key=key_fn_for_sort_object_properties)
         }
 
     def _get_definition(self) -> None:
@@ -807,10 +817,13 @@ class _Cube(Entity, VldbMixin, DeleteMixin):
                     offset=0,
                     limit=limit,
                 )
-                # Get total number of rows from headers.
-                total = int(response.headers['x-mstr-total-count'])
+                # Get total number of rows
+                total = get_total_count_of_objects(response)
                 # Get attribute elements from the response.
                 elements = response.json()
+
+                assert isinstance(limit, int) and limit > 0
+                assert isinstance(total, int) and total >= 0
 
                 # If total number of elements is bigger than the chunk size
                 # (limit), fetch them incrementally.
@@ -874,8 +887,8 @@ class _Cube(Entity, VldbMixin, DeleteMixin):
                             response, f"Error getting attribute {attr['name']} elements"
                         )
                     elements = response.json()
-                    # Get total number of rows from headers.
-                    total = int(response.headers['x-mstr-total-count'])
+                    # Get total number of rows
+                    total = get_total_count_of_objects(response)
                     for _offset in range(limit, total, limit):
                         response = cubes.cube_single_attribute_elements(
                             connection=self._connection,

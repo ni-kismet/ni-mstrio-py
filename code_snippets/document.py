@@ -3,6 +3,7 @@ to present what can be done with this module and to ease its usage.
 """
 
 from mstrio.connection import get_connection
+from mstrio.modeling import Prompt
 from mstrio.project_objects.document import (
     Document, list_documents, list_documents_across_projects
 )
@@ -141,6 +142,9 @@ show_caches_status()
 Document.load_all_caches(connection=conn, status=CACHE_STATUS)
 show_caches_status()
 
+# Invalidating specific caches for documents
+Document.invalidate_caches(connection=conn, ids=[CACHE_ID])
+
 # Delete multiple document caches
 Document.delete_caches(connection=conn, cache_ids=[CACHE_ID, OTHER_CACHE_ID], force=True)
 
@@ -148,3 +152,31 @@ Document.delete_caches(connection=conn, cache_ids=[CACHE_ID, OTHER_CACHE_ID], fo
 Document.delete_all_caches(connection=conn, force=True)
 Document.delete_all_caches(connection=conn, owner=USER_NAME, force=True)
 Document.delete_all_caches(connection=conn, status=CACHE_STATUS, force=True)
+
+PROMPTED_DOCUMENT_ID = $prompted_document_id
+
+# Get document with one prompt
+document = Document(conn, id=PROMPTED_DOCUMENT_ID)
+
+# Print document prompts
+print(document.prompts)
+
+# Get and print first prompt definition
+document_prompt = document.prompts[0]
+print(document_prompt.list_properties())
+
+# Prepare prompt answers
+PROMPT_ANSWERS = "<PLACEHOLDER_PROMPT_ANSWERS>"
+
+# Answer the prompts
+document.answer_prompts(
+    prompt_answers=[
+        Prompt(
+            key=document_prompt.key,
+            answers=PROMPT_ANSWERS
+        ),
+    ],
+    force=True,
+)
+# Publish document
+document.publish()

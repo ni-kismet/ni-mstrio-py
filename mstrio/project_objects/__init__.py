@@ -1,6 +1,8 @@
 # flake8: noqa
 # this order of imports is important to avoid circular imports
-from .bots import Bot, list_bots
+from .applications import Application, list_applications
+from mstrio.project_objects.bots import Bot, list_bots
+from .agents import Agent, list_agents
 from .content_cache import ContentCache
 from .content_group import ContentGroup, list_content_groups
 from .datasets import *
@@ -20,5 +22,7 @@ from .incremental_refresh_report import (
     list_incremental_refresh_reports,
 )
 from .library import Library
-from .prompt import Prompt
 from .report import Report, list_reports
+
+
+from mstrio.project_objects.prompt import Prompt

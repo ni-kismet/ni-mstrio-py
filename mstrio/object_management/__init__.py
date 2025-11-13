@@ -8,6 +8,7 @@ from .folder import (
     get_my_personal_objects_contents,
     get_predefined_folder_contents,
     list_folders,
+    get_folder_id_from_path,
 )
 
 # isort: on
@@ -16,9 +17,11 @@ from .search_enums import (
     SearchDomain,
     SearchPattern,
     SearchResultsFormat,
+    SearchScope,
 )
 from .search_operations import (
     CertifiedStatus,
+    DateQuery,
     QuickSearchData,
     SearchDomain,
     SearchObject,

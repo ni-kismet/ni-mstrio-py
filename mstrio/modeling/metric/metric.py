@@ -14,7 +14,7 @@ from mstrio.modeling.schema.helpers import (
     SchemaObjectReference,
 )
 from mstrio.object_management import Folder, SearchPattern, search_operations
-from mstrio.types import ObjectTypes
+from mstrio.types import ObjectSubTypes, ObjectTypes
 from mstrio.users_and_groups.user import User
 from mstrio.utils.entity import CopyMixin, DeleteMixin, Entity, MoveMixin
 from mstrio.utils.enum_helper import AutoName, get_enum_val
@@ -23,16 +23,24 @@ from mstrio.utils.helper import (
     delete_none_values,
     filter_params_for_func,
     find_object_with_name,
-    get_valid_project_id,
 )
+from mstrio.utils.resolvers import get_project_id_from_params_set
 from mstrio.utils.response_processors import objects as objects_processors
 from mstrio.utils.version_helper import method_version_handler
 from mstrio.utils.vldb_mixin import ModelVldbMixin
 
 if TYPE_CHECKING:
     from mstrio.modeling.metric import Metric
+    from mstrio.server.project import Project
 
 logger = logging.getLogger(__name__)
+
+
+METRIC_SUBTYPES = (
+    ObjectSubTypes.METRIC,
+    ObjectSubTypes.METRIC_DMX,
+    ObjectSubTypes.METRIC_TRAINING,
+)
 
 
 @method_version_handler(version='11.3.0500')
@@ -40,6 +48,7 @@ def list_metrics(
     connection: Connection,
     name: str | None = None,
     metric_type: ObjectTypes = ObjectTypes.METRIC,
+    project: 'Project | str | None' = None,
     project_id: str | None = None,
     project_name: str | None = None,
     to_dictionary: bool = False,
@@ -57,20 +66,16 @@ def list_metrics(
         * - 0 or more of any characters
         e.g. name_begins = ?onny will return Sonny and Tonny
 
-    Specify either `project_id` or `project_name`.
-    When `project_id` is provided (not `None`), `project_name` is omitted.
-
-    Note:
-        When `project_id` is `None` and `project_name` is `None`,
-        then its value is overwritten by `project_id` from `connection` object.
-
     Args:
         connection: Strategy One connection object returned by
             `connection.Connection()`
         name (str, optional): characters that the metric name must
             begin with
         metric_type (ObjectTypes): one of metric subtypes: Metric or AggMetric
-        project_id (str, optional): ID of the project to list the metrics from
+        project (Project | str, optional): Project object or ID or name
+            specifying the project. May be used instead of `project_id` or
+            `project_name`.
+        project_id (str, optional): Project ID
         project_name (str, optional): Project name
         to_dictionary (bool, optional): If True returns dict, by default (False)
             returns Metric objects
@@ -98,17 +103,22 @@ def list_metrics(
     Returns:
         list with Metric objects or list of dictionaries
     """
-    project_id = get_valid_project_id(
-        connection=connection,
-        project_id=project_id,
-        project_name=project_name,
-        with_fallback=not project_name,
+    proj_id = get_project_id_from_params_set(
+        connection,
+        project,
+        project_id,
+        project_name,
     )
+
+    # For METRIC, exclude subtotal subtypes.
+    # Did not set default value to allow explicitly passing METRIC
+    if metric_type == ObjectTypes.METRIC:
+        metric_type = list(METRIC_SUBTYPES)
 
     objects_ = search_operations.full_search(
         connection,
         object_types=metric_type,
-        project=project_id,
+        project=proj_id,
         name=name,
         pattern=search_pattern,
         limit=limit,
@@ -374,6 +384,7 @@ class Metric(Entity, CopyMixin, MoveMixin, DeleteMixin, ModelVldbMixin):  # noqa
         OUTER = auto()
 
     _OBJECT_TYPE = ObjectTypes.METRIC
+    _OBJECT_SUBTYPES = METRIC_SUBTYPES
     _API_GETTERS = {
         (
             'id',

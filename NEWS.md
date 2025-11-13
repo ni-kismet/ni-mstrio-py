@@ -1,5 +1,71 @@
 # Changelog
 
+## 11.5.10.101 - 2025/10/17
+
+### New features
+
+- updated the `SearchObject` class
+  - added method `alter`
+  - released methods `create` and `run` for general availability
+- added function `list_search_objects`
+- added support for LDAP batch import management within `Environment` module
+- added `delete_unused_managed_objects` method to `Project` class to allow deleting unused managed objects in a specific project
+
+### Minor changes
+
+- added arguments `description`, `query_modification_time`, `query_creation_time`, `owner`, `locale_id`, `include_hidden`, `include_subfolders`, `exclude_folders` and `scope` to `full_search` and `start_full_search` functions
+- enabled passing `SearchObject` as content for object migration
+- added `has_dependents` method to `DependenceMixin` class
+- added `scope` parameter into `DependenceMixin`'s methods
+- added support for `ObjectSubTypes` for `object_type` parameter in `list_objects`
+- improved `Usage Remarks` section of mstrio-py's documentation with instructions on how to use `project`-related parameters, how to recognize types and subtypes and how to apply `**filters` in listing methods
+
+### Deprecated
+
+- `mstrio.project_objects.bots` module is superseded by
+  `mstrio.project_objects.agents` and will be removed in the future
+
+## 11.5.9.101 - 2025/09/19
+
+### New features
+
+- updated the `SearchObject` class
+  - added properties related to search query
+  - (preview) added methods `create` and `run`
+- updated `Prompt` class to support general prompt management
+
+### Minor changes
+
+- updated `Project.load()` and `Project.unload()` to use more performant endpoint with server-wide operations
+- improved answering prompts in Report, Document, Dashboard, Subscription
+
+### Bug fixes
+
+- fixed error in enum value name `ObjectSubTypes.SUPER_CUBE_IRR`
+- restored several object types missing in Migration Package contents
+
+### Deprecated
+
+- `mstrio.project_objects.prompt` module is superseded by
+  `mstrio.modeling.prompt` and will be removed in the future, after 1-year deprecation period
+
+## 11.5.8.101 - 2025/08/22
+
+### Minor changes
+
+- added `is_run_in_workstation` method to `Connection` class to check if the script is run in Workstation context
+- added prevention logic to `get_connection` method disallowing accidental connection closing
+- added `model_list_vldb_settings` method to `Report`
+- added possibility to alter `owner` field with `Object` class `alter()` method
+- added possibility to set application name as Library title of `Application` object
+- added `data_source_script_all_users.py` and `transaction_edit_users.py` script templates
+- improved error message for server not supporting new Python Application Type during login
+- added support for object subtypes corresponding to Bots 2.0, Universal Bots and Datamart Reports
+
+### Bug fixes
+
+- fixed `Metric` and `list_metrics` erroneously supporting Subtotal objects
+
 ## 11.5.7.101 - 2025/07/18
 
 ### New features

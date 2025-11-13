@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import auto
 from functools import partial
 from pprint import pformat
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mstrio import config
 from mstrio.api import documents, reports, subscriptions
@@ -26,6 +26,7 @@ from mstrio.distribution_services.subscription.subscription_status import (
     SubscriptionStatus,
 )
 from mstrio.helpers import NotSupportedError
+from mstrio.modeling import Prompt
 from mstrio.users_and_groups import User
 from mstrio.utils import helper, time_helper
 from mstrio.utils.entity import EntityBase
@@ -34,10 +35,14 @@ from mstrio.utils.helper import (
     get_args_from_func,
     get_default_args_from_func,
     get_response_json,
-    get_valid_project_id,
 )
+from mstrio.utils.resolvers import get_project_id_from_params_set
 from mstrio.utils.response_processors import subscriptions as subscriptions_processors
 from mstrio.utils.version_helper import is_server_min_version, method_version_handler
+
+if TYPE_CHECKING:
+    from mstrio.server.project import Project
+
 
 logger = logging.getLogger(__name__)
 
@@ -105,35 +110,39 @@ class Subscription(EntityBase):
     _API_PATCH = [subscriptions.update_subscription]
     _RECIPIENTS_TYPES = RecipientsTypes
     _RECIPIENTS_INCLUDE = ['TO', 'CC', 'BCC', None]
+    _API_GET_PROMPTS = staticmethod(subscriptions.get_subscription_prompts)
 
     def __init__(
         self,
         connection: Connection,
         id: str | None = None,
         subscription_id: str | None = None,
+        project: 'Project | str | None' = None,
         project_id: str | None = None,
         project_name: str | None = None,
     ):
         """Initialize Subscription object, populates it with I-Server data.
-        Specify either `project_id` or `project_name`.
-        When `project_id` is provided (not `None`), `project_name` is omitted.
 
         Args:
             connection (Connection): Strategy One connection object returned
                 by `connection.Connection()`
             id (str, optional): ID of the subscription to be initialized, only
                 id or subscription_id have to be provided at once, if both
-                are provided id will take precedence
+                are provided `id` will take precedence
             subscription_id (str, optional): ID of the subscription to be
                 initialized
+            project (Project | str, optional): Project object or ID or name
+                specifying the project. May be used instead of `project_id` or
+                `project_name`.
             project_id (str, optional): Project ID
             project_name (str, optional): Project name
         """
-        project_id = get_valid_project_id(
-            connection=connection,
-            project_id=project_id,
-            project_name=project_name,
-            with_fallback=not project_name,
+
+        proj_id = get_project_id_from_params_set(
+            connection,
+            project,
+            project_id,
+            project_name,
         )
 
         subscription_id = id or subscription_id
@@ -143,7 +152,7 @@ class Subscription(EntityBase):
                 exception_type=ValueError,
             )
 
-        super().__init__(connection, subscription_id, project_id=project_id)
+        super().__init__(connection, subscription_id, project_id=proj_id)
 
     def _init_variables(self, project_id, **kwargs):
         super()._init_variables(**kwargs)
@@ -191,6 +200,7 @@ class Subscription(EntityBase):
         )
         self.project_id = project_id
         self._status = kwargs.get('status')
+        self._prompts = None
 
     @method_version_handler('11.3.0000')
     def alter(
@@ -549,6 +559,9 @@ class Subscription(EntityBase):
         include_type of single recipient, or just pass recipients list as a
         list of dictionaries.
 
+        Note:
+            When providing recipient ID remember to also provide its type.
+
         Args:
             recipients: list of ids or dicts containing recipients, dict format:
                 {"id": recipient_id,
@@ -579,6 +592,9 @@ class Subscription(EntityBase):
                 "Specify either a recipient ID, type and include type or pass "
                 "recipients dictionaries"
             )
+            helper.exception_handler(msg, ValueError)
+        elif recipients == [] and recipient_id and recipient_type is None:
+            msg = "When providing recipient ID remember to also provide its type."
             helper.exception_handler(msg, ValueError)
 
         all_recipients = self.recipients.copy()
@@ -766,22 +782,35 @@ class Subscription(EntityBase):
         cls,
         source: dict[str, Any],
         connection: "Connection" = None,
+        project: 'Project | str | None' = None,
         project_id: str | None = None,
         project_name: str | None = None,
     ) -> "Subscription":
         """Initialize Subscription object from dictionary.
-        Specify either `project_id` or `project_name`.
-        When `project_id` is provided (not `None`), `project_name` is omitted"""
-        if source.get('project_id') and not project_id:
-            project_id = source['project_id']
-        project_id = get_valid_project_id(
-            connection=connection,
-            project_id=project_id,
-            project_name=project_name,
+
+        Args:
+            source: (dict) A dictionary containing subscription data.
+            connection: (Connection) A Strategy connection object.
+            project (Project | str, optional): Project object or ID or name
+                specifying the project. May be used instead of `project_id` or
+                `project_name`.
+            project_id (str, optional): Project ID
+            project_name (str, optional): Project name
+
+        Returns:
+            A Subscription object.
+        """
+
+        proj_id = get_project_id_from_params_set(
+            connection,
+            project,
+            project_id or source.get('project_id'),
+            project_name,
         )
+
         _source = {
             **source,
-            "project_id": project_id,
+            "project_id": proj_id,
         }
         obj: Subscription = super().from_dict(_source, connection)
 
@@ -883,6 +912,7 @@ class Subscription(EntityBase):
         connection: Connection,
         name: str,
         contents: Content | dict,
+        project: 'Project | str | None' = None,
         project_id: str | None = None,
         project_name: str | None = None,
         multiple_contents: bool | None = None,
@@ -935,8 +965,11 @@ class Subscription(EntityBase):
             connection (Connection): a Strategy One connection object
             name (str): name of the subscription,
             contents (Content): The content settings.
-            project_id (str): project ID,
-            project_name (str): project name,
+            project (Project | str, optional): Project object or ID or name
+                specifying the project. May be used instead of `project_id` or
+                `project_name`.
+            project_id (str, optional): Project ID
+            project_name (str, optional): Project name
             multiple_contents (bool, optional): whether multiple contents are
                 allowed
             allow_delivery_changes (bool): whether the recipients can change
@@ -1020,11 +1053,11 @@ class Subscription(EntityBase):
                 "Name too long. Max name length is 255 characters."
             )
         )
-        project_id = get_valid_project_id(
-            connection=connection,
-            project_id=project_id,
-            project_name=project_name,
-            with_fallback=not project_name,
+        proj_id = get_project_id_from_params_set(
+            connection,
+            project,
+            project_id,
+            project_name,
         )
 
         if not schedules:
@@ -1037,7 +1070,7 @@ class Subscription(EntityBase):
         contents = cls.__validate_contents(contents)
 
         for content in contents:
-            cls._check_is_content_prompted(connection, content, project_id)
+            cls._check_is_content_prompted(connection, content, proj_id)
 
         # Delivery logic
         delivery_expiration_timezone = cls.__validate_expiration_time_zone(
@@ -1089,7 +1122,7 @@ class Subscription(EntityBase):
 
         # Recipients logic
         recipients = cls._validate_recipients(
-            connection, contents, recipients, project_id, delivery['mode']
+            connection, contents, recipients, proj_id, delivery['mode']
         )
 
         # Create body
@@ -1108,13 +1141,13 @@ class Subscription(EntityBase):
         }
 
         body = helper.delete_none_values(body, recursion=True)
-        response = subscriptions.create_subscription(connection, project_id, body)
+        response = subscriptions.create_subscription(connection, proj_id, body)
         unpacked_response = response.json()
         if config.verbose:
             logger.info(
                 f"Created subscription '{name}' with ID: '{unpacked_response['id']}'."
             )
-        return cls.from_dict(unpacked_response, connection, project_id)
+        return cls.from_dict(unpacked_response, connection, proj_id)
 
     @staticmethod
     def _validate_recipients(
@@ -1206,8 +1239,8 @@ class Subscription(EntityBase):
             list[dict]: list of content dicts to be included in REST payload
         """
 
+        from mstrio.modeling.prompt import Prompt
         from mstrio.project_objects.document import Document
-        from mstrio.project_objects.prompt import Prompt
         from mstrio.project_objects.report import Report
 
         contents: list[dict] = [cont.to_dict() for cont in self.contents]
@@ -1225,11 +1258,11 @@ class Subscription(EntityBase):
             }
             if content_type == 'report':
                 rep = Report(self.connection, content['id'])
-                rep.answer_prompts(Prompt.bulk_from_dict(prompts_data))
+                rep.answer_prompts(Prompt.bulk_from_dict(prompts_data), True)
                 dict_update['instanceId'] = rep.instance_id
             elif content_type in ['document', 'dossier']:
                 doc = Document(self.connection, content['id'])
-                doc.answer_prompts(prompts_data)
+                doc.answer_prompts(prompts_data, True)
                 dict_update['instanceId'] = doc.instance_id
             content['personalization'].update({'prompt': dict_update})
         return contents
@@ -1265,3 +1298,78 @@ class Subscription(EntityBase):
                 if k not in ['status', 'last_run']
             }
         super().fetch(attr)
+
+    def answer_prompts(
+        self,
+        prompt_answers: list["Prompt"],
+        force: bool = False,
+    ) -> bool:
+        """Answer prompts of the object.
+
+        Args:
+            prompt_answers (list[Prompt]): List of Prompt class objects
+                answering the prompts of the object.
+            force (bool): If True, then the object's existing prompt will be
+                overwritten by ones from the prompt_answers list, and additional
+                input from the user won't be asked. Otherwise, the user will be
+                asked for input if the prompt is not answered, or if prompt was
+                already answered.
+
+        Returns:
+            bool: True if prompts were answered successfully, False otherwise.
+        """
+        from mstrio.project_objects import Document, Report
+
+        new_contents = []
+        for content_obj in self.contents:
+            selected_obj = None
+            if content_obj.type == Content.Type.REPORT:
+                selected_obj = Report(self.connection, content_obj.id)
+            elif content_obj.type in [
+                Content.Type.DOCUMENT,
+                Content.Type.DASHBOARD,
+            ]:
+                selected_obj = Document(self.connection, content_obj.id)
+            else:
+                raise NotSupportedError(
+                    f"Answering prompts is not supported for content type "
+                    f"'{content_obj.type}'."
+                )
+
+            selected_obj.answer_prompts(prompt_answers, force=force)
+            new_contents.append(
+                Content(
+                    id=selected_obj.id,
+                    type=content_obj.type,
+                    personalization=Content.Properties(
+                        format_type=content_obj.personalization.format_type,
+                        prompt=Content.Properties.Prompt(
+                            enabled=True,
+                            instance_id=selected_obj.instance_id,
+                        ),
+                    ),
+                )
+            )
+
+        self.alter(contents=new_contents)
+        return True
+
+    @property
+    @method_version_handler('11.5.0900')
+    def prompts(self) -> dict:
+        """Prompts of the report."""
+        if self._prompts is None:
+            prompts = (
+                subscriptions.get_subscription_prompts(
+                    connection=self.connection,
+                    subscription_id=self.id,
+                    project_id=self.project_id,
+                )
+                .json()
+                .get('prompts', [])
+            )
+            self._prompts = [
+                Prompt.from_dict(source=prompt, connection=self.connection)
+                for prompt in prompts
+            ]
+        return self._prompts

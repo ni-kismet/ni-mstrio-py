@@ -1,5 +1,5 @@
 import logging
-from functools import partial
+from typing import TYPE_CHECKING
 
 import pandas as pd
 import requests
@@ -11,9 +11,8 @@ from mstrio.api import reports as reports_api
 from mstrio.api.schedules import get_contents_schedule
 from mstrio.connection import Connection
 from mstrio.distribution_services.schedule import Schedule
+from mstrio.modeling import Prompt
 from mstrio.object_management.search_operations import SearchPattern, full_search
-from mstrio.project_objects.helpers import answer_prompts_helper
-from mstrio.project_objects.prompt import Prompt
 from mstrio.users_and_groups.user import User
 from mstrio.utils.cache import CacheSource, ContentCacheMixin
 from mstrio.utils.certified_info import CertifiedInfo
@@ -25,6 +24,7 @@ from mstrio.utils.entity import (
     MoveMixin,
     ObjectSubTypes,
     ObjectTypes,
+    PromptMixin,
     VldbMixin,
 )
 from mstrio.utils.filter import Filter
@@ -33,15 +33,24 @@ from mstrio.utils.helper import (
     fallback_on_timeout,
     find_object_with_name,
     get_parallel_number,
-    get_valid_project_id,
+    get_total_count_of_objects,
+    key_fn_for_sort_object_properties,
     response_handler,
-    sort_object_properties,
 )
 from mstrio.utils.parser import Parser
 from mstrio.utils.related_subscription_mixin import RelatedSubscriptionMixin
+from mstrio.utils.resolvers import (
+    get_project_id_from_params_set,
+    validate_owner_key_in_filters,
+)
 from mstrio.utils.response_processors import objects as objects_processors
+from mstrio.utils.response_processors import reports as reports_processors_api
 from mstrio.utils.sessions import FuturesSessionWithRenewal
 from mstrio.utils.version_helper import meets_minimal_version
+from mstrio.utils.vldb_mixin import ModelVldbMixin
+
+if TYPE_CHECKING:
+    from mstrio.server.project import Project
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +59,7 @@ def list_reports(
     connection: Connection,
     name: str | None = None,
     search_pattern: SearchPattern | int = SearchPattern.CONTAINS,
+    project: 'Project | str | None' = None,
     project_id: str | None = None,
     project_name: str | None = None,
     to_dictionary: bool = False,
@@ -68,13 +78,6 @@ def list_reports(
         * - 0 or more of any characters
         e.g. name = ?onny will return Sonny and Tonny
 
-    Specify either `project_id` or `project_name`.
-    When `project_id` is provided (not `None`), `project_name` is omitted.
-
-    Note:
-        When `project_id` is `None` and `project_name` is `None`,
-        then its value is overwritten by `project_id` from `connection` object.
-
     Args:
         connection: Strategy One connection object returned by
             `connection.Connection()`
@@ -86,8 +89,11 @@ def list_reports(
             for, such as Begin With or Contains. Possible values are available
             in ENUM mstrio.object_management.SearchPattern.
             Default value is BEGIN WITH (4).
-        project_id (string, optional): Project ID
-        project_name (string, optional): Project name
+        project (Project | str, optional): Project object or ID or name
+            specifying the project. May be used instead of `project_id` or
+            `project_name`.
+        project_id (str, optional): Project ID
+        project_name (str, optional): Project name
         limit (integer, optional): limit the number of elements returned. If
             None all object are returned.
         folder_id (string, optional): ID of a folder where the search
@@ -107,17 +113,19 @@ def list_reports(
     Returns:
         list with Report objects or list of dictionaries
     """
-    project_id = get_valid_project_id(
-        connection=connection,
-        project_id=project_id,
-        project_name=project_name,
-        with_fallback=not project_name,
+    proj_id = get_project_id_from_params_set(
+        connection,
+        project,
+        project_id,
+        project_name,
     )
+
+    validate_owner_key_in_filters(filters)
 
     objects_ = full_search(
         connection,
         object_types=ObjectTypes.REPORT_DEFINITION,
-        project=project_id,
+        project=proj_id,
         name=name,
         pattern=search_pattern,
         limit=limit,
@@ -146,6 +154,7 @@ class Report(
     DeleteMixin,
     ContentCacheMixin,
     VldbMixin,
+    PromptMixin,
     RelatedSubscriptionMixin,
 ):
     """Access, filter, publish, and extract data from in-memory reports.
@@ -202,6 +211,7 @@ class Report(
         ObjectSubTypes.REPORT_GRID,
         ObjectSubTypes.REPORT_GRAPH,
         ObjectSubTypes.REPORT_ENGINE,
+        ObjectSubTypes.REPORT_DATAMART,
         ObjectSubTypes.REPORT_GRID_AND_GRAPH,
         ObjectSubTypes.REPORT_TRANSACTION,
         ObjectSubTypes.REPORT_HYPER_CARD,
@@ -227,6 +237,11 @@ class Report(
             'partial_put',
         )
     }
+    _API_GET_PROMPTS = staticmethod(reports_api.get_report_prompts)
+    _API_PROMPT_GET_INSTANCE = staticmethod(reports_api.report_instance)
+    _API_PROMPT_GET_OBJ_STATUS = staticmethod(reports_processors_api.get_report_status)
+    _API_PROMPT_GET_PROMPTED_INSTANCE = staticmethod(reports_api.get_prompted_instance)
+    _API_PROMPT_ANSWER_PROMPTS = staticmethod(reports_api.answer_report_prompts)
 
     def __init__(
         self,
@@ -287,9 +302,22 @@ class Report(
                 progress_bar=progress_bar,
             )
 
+        # Report exposes VLDB property methods through both VldbMixin and
+        # ModelVldbMixin. Due to name confusion, the Modeling Service methods
+        # are prefixed with 'model_'.
+        self._model_vldb = ModelVldbMixin()
+        self._model_vldb._MODEL_VLDB_API = {
+            'GET_ADVANCED': reports_api.get_vldb_settings,
+            'GET_APPLICABLE': reports_api.get_applicable_vldb_settings,
+        }
+        self._model_vldb.connection = self.connection
+        self._model_vldb.id = self.id
+
+        self.model_list_vldb_settings = self._model_vldb.list_vldb_settings
+
     def _init_variables(self, default_value, **kwargs):
         super()._init_variables(default_value=default_value, **kwargs)
-        self.instance_id = kwargs.get("instance_id")
+        self._instance_id = kwargs.get("instance_id")
         self._parallel = kwargs.get("parallel", True)
         self._initial_limit = 1000
         self._progress_bar = kwargs.get("progress_bar", True) and config.progress_bar
@@ -301,7 +329,6 @@ class Report(
         self._page_by_elements = {}
         self._sql = None
         self._current_page_by = []
-        self._prompts = None
 
         self._attributes = []
         self._metrics = []
@@ -386,7 +413,7 @@ class Report(
                 for el_id, attr in zip(page_element_id, attr_ids)
             ]
 
-        if self.instance_id is None or page_element_id != self._current_page_by:
+        if self._instance_id is None or page_element_id != self._current_page_by:
             self._current_page_by = page_element_id
             res = self.__initialize_report(self._initial_limit)
         else:
@@ -394,13 +421,13 @@ class Report(
             # if not possible, initialize new instance
             try:
                 res = self.__get_chunk(
-                    instance_id=self.instance_id, offset=0, limit=self._initial_limit
+                    instance_id=self._instance_id, offset=0, limit=self._initial_limit
                 )
             except requests.HTTPError:
                 res = self.__initialize_report(self._initial_limit)
 
         _instance = res.json()
-        self.instance_id = _instance['instanceId']
+        self._instance_id = _instance['instanceId']
 
         # Answer prompts if provided
         if prompt_answers:
@@ -408,15 +435,16 @@ class Report(
             reports_api.answer_report_prompts(
                 connection=self._connection,
                 report_id=self.id,
-                instance_id=self.instance_id,
+                instance_id=self._instance_id,
                 body=json,
+                project_id=self.project_id,
             )
             # Get the instance results again, as they weren't generated
             # properly until the prompts were answered
             _instance = reports_api.report_instance_id(
                 connection=self.connection,
                 report_id=self.id,
-                instance_id=self.instance_id,
+                instance_id=self._instance_id,
                 offset=0,
                 limit=self._initial_limit,
             ).json()
@@ -460,7 +488,7 @@ class Report(
                         disable=(not self._progress_bar),
                     )
                     future = self.__fetch_chunks_future(
-                        session, paging, self.instance_id, limit
+                        session, paging, self._instance_id, limit
                     )
                     fetch_pbar.update()
                     for i, f in enumerate(future, start=1):
@@ -476,7 +504,7 @@ class Report(
                         p.parse(response.json())
                     fetch_pbar.close()
             else:
-                self.__fetch_chunks(p, paging, it_total, self.instance_id, limit)
+                self.__fetch_chunks(p, paging, it_total, self._instance_id, limit)
 
         # return parsed data as a data frame
         self._dataframe = p.dataframe
@@ -600,6 +628,7 @@ class Report(
         response = reports_api.report_instance(
             connection=self._connection,
             report_id=self._id,
+            project_id=self.project_id,
             body=body,
             offset=0,
             limit=limit or self._initial_limit,
@@ -660,7 +689,7 @@ class Report(
             self._select_metric_filter_conditionally(metrics)
             self._select_attr_el_filter_conditionally(attr_elements)
             # Clear instance, to generate new with new filters
-            self.instance_id = None
+            self._instance_id = None
 
     def _select_attribute_filter_conditionally(self, attributes_filtered) -> None:
         if attributes_filtered:
@@ -687,7 +716,7 @@ class Report(
             self._filter._select(object_id=[el['id'] for el in self.attributes])
             self._filter._select(object_id=[el['id'] for el in self.metrics])
         # Clear instance, to generate new with new filters
-        self.instance_id = None
+        self._instance_id = None
 
     def _get_definition(self) -> None:
         """Get the definition of a report, including attributes and metrics.
@@ -766,10 +795,13 @@ class Report(
                     offset=0,
                     limit=limit,
                 )
-                # Get total number of rows from headers.
-                total = int(response.headers['x-mstr-total-count'])
+                # Get total number of rows
+                total = get_total_count_of_objects(response)
                 # Get attribute elements from the response.
                 elements = response.json()
+
+                assert isinstance(limit, int) and limit > 0
+                assert isinstance(total, int) and total >= 0
 
                 # If total number of elements is bigger than the chunk size
                 # (limit), fetch them incrementally.
@@ -842,8 +874,8 @@ class Report(
                             response, f"Error getting attribute {attr['name']} elements"
                         )
                     elements = response.json()
-                    # Get total number of rows from headers.
-                    total = int(response.headers['x-mstr-total-count'])
+                    # Get total number of rows
+                    total = get_total_count_of_objects(response)
                     for _offset in range(limit, total, limit):
                         response = reports_api.report_single_attribute_elements(
                             connection=self._connection,
@@ -905,7 +937,7 @@ class Report(
         }
         return {
             key: attributes[key]
-            for key in sorted(attributes, key=sort_object_properties)
+            for key in sorted(attributes, key=key_fn_for_sort_object_properties)
         }
 
     def list_available_schedules(
@@ -936,57 +968,6 @@ class Report(
             Schedule.from_dict(connection=self.connection, source=schedule_id)
             for schedule_id in schedules_list_response
         ]
-
-    def answer_prompts(self, prompt_answers: list[Prompt], force: bool = False) -> bool:
-        """Answer prompts of the report.
-
-        Args:
-            prompt_answers (list[Prompt]): List of Prompt class objects
-                answering the prompts of the report.
-            force (bool): If True, then the report's existing prompt will be
-                overwritten by ones from the prompt_answers list, and additional
-                input from the user won't be asked. Otherwise, the user will be
-                asked for input if the prompt is not answered, or if prompt was
-                already answered.
-
-        Returns:
-            bool: True if prompts were answered successfully, False otherwise.
-        """
-        instance_id = self.instance_id or reports_api.report_instance(
-            connection=self.connection,
-            report_id=self.id,
-        ).json().get('instanceId')
-
-        common_args = {
-            'connection': self.connection,
-            'report_id': self.id,
-            'instance_id': instance_id,
-        }
-
-        if not answer_prompts_helper(
-            instance_id=instance_id,
-            prompt_answers=prompt_answers,
-            get_status_func=partial(
-                reports_api.get_report_status,
-                **common_args,
-                project_id=self.project_id,
-            ),
-            get_prompts_func=partial(
-                reports_api.get_prompted_instance,
-                **common_args,
-                closed=False,
-            ),
-            answer_prompts_func=partial(
-                reports_api.answer_report_prompts, **common_args
-            ),
-            force=force,
-        ):
-            return False
-
-        # If prompts were answered successfully, update the instance_id
-        self.instance_id = instance_id
-
-        return True
 
     @property
     def attributes(self):
@@ -1083,8 +1064,8 @@ class Report(
         """SQL View of the Report."""
         if self._sql is None:
             temp_instance_id = (
-                self.instance_id
-                if self.instance_id
+                self._instance_id
+                if self._instance_id
                 else reports_api.report_instance(
                     connection=self.connection,
                     report_id=self.id,
@@ -1105,11 +1086,9 @@ class Report(
         return self._sql
 
     @property
-    def prompts(self) -> dict:
-        """Prompts of the report."""
-        if self._prompts is None:
-            prompts = reports_api.get_report_prompts(
-                connection=self.connection, report_id=self.id
-            ).json()
-            self._prompts = [Prompt.from_dict(prompt) for prompt in prompts]
-        return self._prompts
+    def instance_id(self):
+        return self._instance_id
+
+    @instance_id.setter
+    def instance_id(self, value):
+        self._instance_id = value

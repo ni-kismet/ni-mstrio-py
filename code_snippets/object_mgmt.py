@@ -26,6 +26,7 @@ from mstrio.object_management import (
     quick_search_by_id,
     QuickSearchData
 )
+from mstrio.object_management.search_enums import SearchDomain, SearchScope
 from mstrio.project_objects import Dashboard
 from mstrio.types import ObjectSubTypes, ObjectTypes
 from mstrio.helpers import Rights
@@ -97,16 +98,24 @@ folder.delete(force=True)
 reports = list_objects(conn, ObjectTypes.REPORT_DEFINITION)  # see types.py for ObjectTypes values
 documents = list_objects(conn, ObjectTypes.DOCUMENT_DEFINITION)
 
+# list objects of a given subtype in the project
+cubes = list_objects(conn, ObjectSubTypes.OLAP_CUBE, domain=SearchDomain.PROJECT)
+
 # Define variables which can be later used in a script
 OBJECT_ID = $object_id
 OBJECT_NAME = $object_name
 OBJECT_DESCRIPTION = $object_description
+OBJECT_NEW_OWNER = $object_new_owner
 
 # initialize an object of a given type (in this case `FOLDER`) with a given id
 object = Object(conn, ObjectTypes.FOLDER, OBJECT_ID)  # see types.py for ObjectTypes values
 
 # alter name and description of an object
 object.alter(name=OBJECT_NAME, description=OBJECT_DESCRIPTION)
+
+# alter object's owner field (owner can be passed as a username, user ID, or User object)
+object.alter(owner = OBJECT_NEW_OWNER)
+
 
 # Define variables which can be later used in a script
 REPORT_ID = $report_id
@@ -207,6 +216,13 @@ results = full_search(
     root=FOLDER_ID
 )
 
+# Get object in the project with a given ID using full search
+results = full_search(
+    conn,
+    PROJECT_ID,
+    id=OBJECT_ID,
+)
+
 # return cubes that are used by the given dashboard (it can be performed with the
 # function `full_search` or method `get_connected_cubes` from `Document` class
 # or method `get_dependencies` from `Entity` class)
@@ -237,4 +253,11 @@ objects = full_search(
     uses_object_id=METRIC_ID,
     uses_object_type=ObjectTypes.METRIC,
     uses_recursive=True
+)
+
+# get all managed objects
+all_managed_objects = full_search(
+    conn,
+    project=PROJECT_ID,
+    scope=SearchScope.MANAGED_ONLY
 )
